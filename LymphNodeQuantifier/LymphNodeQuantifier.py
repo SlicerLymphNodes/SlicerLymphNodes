@@ -69,20 +69,6 @@ def registerSampleData():
     nodeNames='LymphNodeQuantifier1'
   )
 
-  # LymphNodeQuantifier2
-  SampleData.SampleDataLogic.registerCustomSampleDataSource(
-    # Category and sample name displayed in Sample Data module
-    category='LymphNodeQuantifier',
-    sampleName='LymphNodeQuantifier2',
-    thumbnailFileName=os.path.join(iconsPath, 'LymphNodeQuantifier2.png'),
-    # Download URL and target file name
-    uris="https://github.com/Slicer/SlicerTestingData/releases/download/SHA256/1a64f3f422eb3d1c9b093d1a18da354b13bcf307907c66317e2463ee530b7a97",
-    fileNames='LymphNodeQuantifier2.nrrd',
-    checksums = 'SHA256:1a64f3f422eb3d1c9b093d1a18da354b13bcf307907c66317e2463ee530b7a97',
-    # This node name will be used when the data set is loaded
-    nodeNames='LymphNodeQuantifier2'
-  )
-
 #
 # LymphNodeQuantifierWidget
 #
@@ -360,7 +346,8 @@ class LymphNodeQuantifierTest(ScriptedLoadableModuleTest):
   def setUp(self):
     """ Do whatever is needed to reset the state - typically a scene clear will be enough.
     """
-    slicer.mrmlScene.Clear()
+    #slicer.mrmlScene.Clear()
+    pass
 
   def runTest(self):
     """Run as few or as many tests as needed here.
@@ -386,30 +373,78 @@ class LymphNodeQuantifierTest(ScriptedLoadableModuleTest):
 
     import SampleData
     registerSampleData()
-    inputVolume = SampleData.downloadSample('LymphNodeQuantifier1')
+
+    try:
+        self.inputVolume = slicer.util.getNode("mediastinal_lymph_nodes")
+    except slicer.util.MRMLNodeNotFoundException:
+        uid = "61.7.268932832015213001984415936188077395608"
+        import DICOMLib
+        nodes = DICOMLib.DICOMUtils.loadSeriesByUID([uid])
+        self.inputVolume = slicer.util.getNode(nodes[0])
+
     self.delayDisplay('Loaded test data set')
 
-    inputScalarRange = inputVolume.GetImageData().GetScalarRange()
-    self.assertEqual(inputScalarRange[0], 0)
-    self.assertEqual(inputScalarRange[1], 695)
+    try:
+        self.fiducialNode = slicer.util.getNode("F")
+    except slicer.util.MRMLNodeNotFoundException:
+        position_RAS = [-5.186842396450572, 100.37290704961175, -133.07352941176475]
+        slicer.modules.markups.logic().AddFiducial(*position_RAS)
+        self.fiducialNode = slicer.util.getNode("F")
+        self.fiducialNode.AddObserver(slicer.vtkMRMLMarkupsFiducialNode.PointEndInteractionEvent, self.infer)
 
-    outputVolume = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
-    threshold = 100
+    try:
+        self.predictionLabel = slicer.util.getNode("Lymph node prediction")
+    except slicer.util.MRMLNodeNotFoundException:
+        self.predictionLabel = slicer.mrmlScene.AddNewNodeByClass("vtkMRMLScalarVolumeNode")
+        self.predictionLabel.CreateDefaultDisplayNodes()
+        self.predictionLabel.SetName("Lymph node prediction")
+    predictionDisplayNode = self.predictionLabel.GetDisplayNode()
+    predictionDisplayNode.SetApplyThreshold(True)
+    predictionDisplayNode.SetUpperThreshold(1.)
+    predictionDisplayNode.SetLowerThreshold(0.02)
+    predictionDisplayNode.SetAutoWindowLevel(False)
+    predictionDisplayNode.SetWindow(1.)
+    predictionDisplayNode.SetLevel(0.5)
+    predictionDisplayNode.SetAndObserveColorNodeID("vtkMRMLColorTableNodeFileInferno.txt")
 
-    # Test the module logic
+    try:
+        import tensorflow
+    except ModuleNotFoundError:
+        slicer.util.pip_install("tensorflow")
+        import tensorflow
+    try:
+        import pandas
+    except ModuleNotFoundError:
+        slicer.util.pip_install("pandas")
+        import pandas
 
-    logic = LymphNodeQuantifierLogic()
+    # sets slicer.modules.infer to the inference callable
+    __name__ = "not_main"
+    path = os.path.dirname(slicer.modules.lymphnodequantifier.path) + "/../lnq/timc_first_batch_test/test_nih_segmenter/1_infer.py"
+    exec(open(path).read())
 
-    # Test algorithm with non-inverted threshold
-    logic.process(inputVolume, outputVolume, threshold, True)
-    outputScalarRange = outputVolume.GetImageData().GetScalarRange()
-    self.assertEqual(outputScalarRange[0], inputScalarRange[0])
-    self.assertEqual(outputScalarRange[1], threshold)
+    self.infer()
 
-    # Test algorithm with inverted threshold
-    logic.process(inputVolume, outputVolume, threshold, False)
-    outputScalarRange = outputVolume.GetImageData().GetScalarRange()
-    self.assertEqual(outputScalarRange[0], inputScalarRange[0])
-    self.assertEqual(outputScalarRange[1], inputScalarRange[1])
 
     self.delayDisplay('Test passed')
+
+  def infer(self, caller=None, event=None):
+
+    import SimpleITK as sitk
+    import sitkUtils
+
+    imagePath = slicer.app.temporaryPath + "/image.nrrd"
+    slicer.util.saveNode(self.inputVolume, imagePath, {"useCompression": 0})
+
+    position_RAS = [0]*3
+    self.fiducialNode.GetNthFiducialPosition(0,position_RAS)
+    position_LPS = [position_RAS[i] * [-1,-1,1][i] for i in range(3)]
+
+    slicer.modules.prediction = slicer.modules.infer(imagePath, position_LPS)
+
+    nodeWriteAddress = sitkUtils.GetSlicerITKReadWriteAddress(self.predictionLabel)
+    sitk.WriteImage(slicer.modules.prediction, nodeWriteAddress)
+
+    slicer.util.setSliceViewerLayers(label=self.predictionLabel)
+    slicer.vtkMRMLSliceNode.JumpAllSlices(slicer.mrmlScene, *position_RAS,
+                                            slicer.vtkMRMLSliceNode.CenteredJumpSlice)
